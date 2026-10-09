@@ -7,97 +7,88 @@ const app = express();
 app.use(cors());
 
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.5',
-  'Connection': 'keep-alive'
+  'Accept-Language': 'en-US,en;q=0.5'
 };
 
 app.get('/api/get-stream', async (req, res) => {
   const { id, type = 'movie', season = 1, episode = 1 } = req.query;
 
   if (!id) {
-    return res.status(400).json({ success: false, error: 'TMDB ID path missing' });
+    return res.status(400).json({ success: false, error: 'TMDB ID required' });
   }
 
   try {
-    // ১. প্রোভাইডার সোর্স URL গঠন
-    let targetUrl = '';
+    // ১. ব্যাকআপ স্ট্রিমিং প্রোভাইডার্স তালিকা
+    let embedUrls = [];
     if (type === 'tv' || type === 'series') {
-      targetUrl = `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`;
+      embedUrls = [
+        `https://vidsrc.cc/v2/embed/tv/${id}/${season}/${episode}`,
+        `https://vidsrc.me/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+        `https://vidsrc.xyz/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`
+      ];
     } else {
-      targetUrl = `https://vidsrc.to/embed/movie/${id}`;
+      embedUrls = [
+        `https://vidsrc.cc/v2/embed/movie/${id}`,
+        `https://vidsrc.me/embed/movie?tmdb=${id}`,
+        `https://vidsrc.xyz/embed/movie?tmdb=${id}`
+      ];
     }
 
-    // ২. প্রথম রিকোয়েস্ট ফেচ করা
-    const response = await axios.get(targetUrl, { 
-      headers: HEADERS,
-      timeout: 10000 
-    });
+    let streamUrl = null;
+    let usedReferer = '';
 
-    const html = response.data;
+    // ২. প্রতিটি প্রোভাইডার থেকে সোর্স বের করার চেষ্টা করা
+    for (const url of embedUrls) {
+      try {
+        const response = await axios.get(url, { headers: HEADERS, timeout: 5000 });
+        const html = response.data;
 
-    // ৩. m3u8 ফরম্যাট ম্যাচ করা (Direct & Obfuscated Patterns)
-    let m3u8Match = html.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i) ||
-                    html.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i) ||
-                    html.match(/src\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+        // m3u8 লিংক খোঁজার Regex
+        const match = html.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i) ||
+                      html.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i) ||
+                      html.match(/src\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
 
-    // ৪. যদি সরাসরি না পাওয়া যায়, তবে ইনার সোর্স আইফ্রেম খোঁজা
-    if (!m3u8Match) {
-      const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
-      if (iframeMatch && iframeMatch[1]) {
-        let iframeUrl = iframeMatch[1].startsWith('//') ? 'https:' + iframeMatch[1] : iframeMatch[1];
-        
-        const iframeRes = await axios.get(iframeUrl, { 
-          headers: { ...HEADERS, 'Referer': targetUrl },
-          timeout: 10000 
-        });
-
-        m3u8Match = iframeRes.data.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i) ||
-                    iframeRes.data.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+        if (match && match[1]) {
+          streamUrl = match[1].replace(/\\/g, '');
+          usedReferer = url;
+          break;
+        }
+      } catch (err) {
+        continue; // পরবর্তী প্রোভাইডারে চেষ্টা করবে
       }
     }
 
-    if (m3u8Match && m3u8Match[1]) {
-      const cleanUrl = m3u8Match[1].replace(/\\/g, ''); // Escape backslashes
+    // ৩. রেসপন্স পাঠানো
+    if (streamUrl) {
       return res.json({
         success: true,
         type: type,
         tmdbId: id,
-        streamUrl: cleanUrl,
+        streamUrl: streamUrl,
         headers: {
-          'Referer': 'https://vidsrc.to/',
+          'Referer': usedReferer,
           'User-Agent': HEADERS['User-Agent']
         }
       });
     }
 
-    // ৫. ব্যাকআপ ফলব্যাক সার্ভিস (যদি VidSrc ব্লক করে)
-    const fallbackUrl = `https://vidsrc.cc/v2/embed/movie/${id}`;
-    const fbRes = await axios.get(fallbackUrl, { headers: HEADERS, timeout: 8000 });
-    const fbMatch = fbRes.data.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i);
+    // ৪. যদি কোনো সরাসরি .m3u8 না পাওয়া যায় তবে এম্বেড প্লেয়ার লিংক পাঠানো
+    const fallbackEmbed = type === 'tv' 
+      ? `https://vidsrc.cc/v2/embed/tv/${id}/${season}/${episode}`
+      : `https://vidsrc.cc/v2/embed/movie/${id}`;
 
-    if (fbMatch && fbMatch[1]) {
-      return res.json({
-        success: true,
-        type: type,
-        tmdbId: id,
-        streamUrl: fbMatch[1],
-        headers: {
-          'Referer': 'https://vidsrc.cc/',
-          'User-Agent': HEADERS['User-Agent']
-        }
-      });
-    }
-
-    return res.status(404).json({ 
-      success: false, 
-      message: 'Stream not found from providers' 
+    return res.json({
+      success: true,
+      isEmbedFallback: true,
+      embedUrl: fallbackEmbed,
+      message: 'Direct m3u8 blocked, fallback to clean embed'
     });
 
   } catch (error) {
-    console.error('Server error:', error.message);
-    res.status(500).json({ success: false, error: 'Extraction service failed' });
+    console.error('Extraction error:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to process request' });
   }
 });
 
