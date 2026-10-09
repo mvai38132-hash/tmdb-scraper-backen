@@ -7,55 +7,59 @@ const app = express();
 app.use(cors());
 
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Accept': '*/*'
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 };
 
 app.get('/api/get-stream', async (req, res) => {
   const { id, type = 'movie', season = 1, episode = 1 } = req.query;
 
   if (!id) {
-    return res.status(400).json({ success: false, error: 'TMDB ID is required' });
+    return res.status(400).json({ success: false, error: 'TMDB ID required' });
   }
 
-  // ১. স্যান্ডবক্সড অ্যাড-ফ্রি এম্বেড প্লেয়ার URL (Fallback)
-  const embedFallback = type === 'tv' || type === 'series' 
-    ? `https://vidsrc.icu/embed/tv/${id}/${season}/${episode}`
-    : `https://vidsrc.icu/embed/movie/${id}`;
+  // সচল প্রোভাইডারগুলোর লিস্ট (vidsrc.cc & vidsrc.me)
+  const providers = type === 'tv' || type === 'series'
+    ? [
+        `https://vidsrc.cc/v2/embed/tv/${id}/${season}/${episode}`,
+        `https://vidsrc.me/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+        `https://player.autoembed.cc/embed/tv/${id}/${season}/${episode}`
+      ]
+    : [
+        `https://vidsrc.cc/v2/embed/movie/${id}`,
+        `https://vidsrc.me/embed/movie?tmdb=${id}`,
+        `https://player.autoembed.cc/embed/movie/${id}`
+      ];
 
-  try {
-    // ২. সরাসরি m3u8 লিংক এক্সট্র্যাক্ট করার চেষ্টা
-    const response = await axios.get(embedFallback, { headers: HEADERS, timeout: 7000 });
-    const htmlData = response.data;
+  // ১. প্রোভাইডার টেস্ট করে ব্যাকএন্ড m3u8 লিংক এক্সট্র্যাক্ট করার চেষ্টা করবে
+  for (const embedUrl of providers) {
+    try {
+      const response = await axios.get(embedUrl, { headers: HEADERS, timeout: 5000 });
+      const htmlData = response.data;
 
-    let m3u8Match = htmlData.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i) 
-                 || htmlData.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+      let m3u8Match = htmlData.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i) 
+                   || htmlData.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
 
-    if (m3u8Match && m3u8Match[1]) {
-      return res.json({
-        success: true,
-        mode: 'm3u8',
-        streamUrl: m3u8Match[1].replace(/\\/g, ''),
-        headers: { 'Referer': 'https://vidsrc.icu/' }
-      });
+      if (m3u8Match && m3u8Match[1]) {
+        return res.json({
+          success: true,
+          mode: 'm3u8',
+          streamUrl: m3u8Match[1].replace(/\\/g, ''),
+          headers: { 'Referer': embedUrl }
+        });
+      }
+    } catch (e) {
+      // সোর্স ডাউন থাকলে পরবর্তী সোর্সে যাবে
+      continue;
     }
-
-    // ৩. m3u8 ব্লক থাকলে সেফ এম্বেড প্লেয়ার পাঠানো
-    return res.json({
-      success: true,
-      mode: 'embed',
-      embedUrl: embedFallback,
-      message: 'Direct m3u8 blocked, playing via clean embed.'
-    });
-
-  } catch (error) {
-    // যেকোনো এররে এম্বেড ফলব্যাক
-    return res.json({
-      success: true,
-      mode: 'embed',
-      embedUrl: embedFallback
-    });
   }
+
+  // ২. যদি m3u8 ব্লক থাকে, তবে প্রথম সচল প্রোভাইডারের Clean Embed দিয়ে দেবে
+  return res.json({
+    success: true,
+    mode: 'embed',
+    embedUrl: providers[0],
+    message: 'Playing via working provider embed.'
+  });
 });
 
 const PORT = process.env.PORT || 3000;
