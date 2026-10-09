@@ -1,14 +1,9 @@
-// server.js
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(cors());
-
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-};
 
 app.get('/api/get-stream', async (req, res) => {
   const { id, type = 'movie', season = 1, episode = 1 } = req.query;
@@ -17,42 +12,63 @@ app.get('/api/get-stream', async (req, res) => {
     return res.status(400).json({ success: false, error: 'TMDB ID required' });
   }
 
-  // শতভাগ সচল এবং আইফ্রেম ফ্রেন্ডলি প্রোভাইডার
-  const embedFallback = type === 'tv' || type === 'series'
+  const targetUrl = type === 'tv' || type === 'series'
     ? `https://vidsrc.me/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`
     : `https://vidsrc.me/embed/movie?tmdb=${id}`;
 
+  let browser;
   try {
-    // ১. ব্যাকএন্ডে m3u8 এক্সট্র্যাক্ট করার চেষ্টা
-    const response = await axios.get(embedFallback, { headers: HEADERS, timeout: 5000 });
-    const htmlData = response.data;
+    // Puppeteer Headless Browser Launch
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu'
+      ]
+    });
 
-    let m3u8Match = htmlData.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i) 
-                 || htmlData.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+    const page = await browser.newPage();
+    let capturedStreamUrl = null;
 
-    if (m3u8Match && m3u8Match[1]) {
-      return res.json({
-        success: true,
-        mode: 'm3u8',
-        streamUrl: m3u8Match[1].replace(/\\/g, ''),
-        headers: { 'Referer': 'https://vidsrc.me/' }
-      });
+    // Real-time Network Request Monitor
+    page.on('request', request => {
+      const url = request.url();
+      if (url.includes('.m3u8') && !capturedStreamUrl) {
+        capturedStreamUrl = url;
+      }
+    });
+
+    // Page Load & Wait for HLS traffic
+    await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+
+    if (!capturedStreamUrl) {
+      // Background click simulation to trigger video load
+      await page.click('body').catch(() => {});
+      await page.waitForTimeout(2000);
     }
 
-    // ২. m3u8 না পাওয়া গেলে সরাসরি Working Embed Stream পাঠানো
-    return res.json({
-      success: true,
-      mode: 'embed',
-      embedUrl: embedFallback
-    });
+    await browser.close();
+
+    if (capturedStreamUrl) {
+      return res.json({
+        success: true,
+        streamUrl: capturedStreamUrl,
+        headers: {
+          'Referer': 'https://vidsrc.me/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        }
+      });
+    } else {
+      return res.status(404).json({ success: false, message: 'm3u8 request not intercepted' });
+    }
 
   } catch (error) {
-    // যেকোনো ব্যাকএন্ড এররে ফলব্যাক এম্বেড
-    return res.json({
-      success: true,
-      mode: 'embed',
-      embedUrl: embedFallback
-    });
+    if (browser) await browser.close();
+    console.error('Puppeteer Error:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to extract stream using browser automation' });
   }
 });
 
