@@ -17,49 +17,43 @@ app.get('/api/get-stream', async (req, res) => {
     return res.status(400).json({ success: false, error: 'TMDB ID required' });
   }
 
-  // সচল প্রোভাইডারগুলোর লিস্ট (vidsrc.cc & vidsrc.me)
-  const providers = type === 'tv' || type === 'series'
-    ? [
-        `https://vidsrc.cc/v2/embed/tv/${id}/${season}/${episode}`,
-        `https://vidsrc.me/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
-        `https://player.autoembed.cc/embed/tv/${id}/${season}/${episode}`
-      ]
-    : [
-        `https://vidsrc.cc/v2/embed/movie/${id}`,
-        `https://vidsrc.me/embed/movie?tmdb=${id}`,
-        `https://player.autoembed.cc/embed/movie/${id}`
-      ];
+  // শতভাগ সচল এবং আইফ্রেম ফ্রেন্ডলি প্রোভাইডার
+  const embedFallback = type === 'tv' || type === 'series'
+    ? `https://vidsrc.me/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`
+    : `https://vidsrc.me/embed/movie?tmdb=${id}`;
 
-  // ১. প্রোভাইডার টেস্ট করে ব্যাকএন্ড m3u8 লিংক এক্সট্র্যাক্ট করার চেষ্টা করবে
-  for (const embedUrl of providers) {
-    try {
-      const response = await axios.get(embedUrl, { headers: HEADERS, timeout: 5000 });
-      const htmlData = response.data;
+  try {
+    // ১. ব্যাকএন্ডে m3u8 এক্সট্র্যাক্ট করার চেষ্টা
+    const response = await axios.get(embedFallback, { headers: HEADERS, timeout: 5000 });
+    const htmlData = response.data;
 
-      let m3u8Match = htmlData.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i) 
-                   || htmlData.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+    let m3u8Match = htmlData.match(/(https?:\/\/[^"'\s]+\.m3u8[^\s"']*)/i) 
+                 || htmlData.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
 
-      if (m3u8Match && m3u8Match[1]) {
-        return res.json({
-          success: true,
-          mode: 'm3u8',
-          streamUrl: m3u8Match[1].replace(/\\/g, ''),
-          headers: { 'Referer': embedUrl }
-        });
-      }
-    } catch (e) {
-      // সোর্স ডাউন থাকলে পরবর্তী সোর্সে যাবে
-      continue;
+    if (m3u8Match && m3u8Match[1]) {
+      return res.json({
+        success: true,
+        mode: 'm3u8',
+        streamUrl: m3u8Match[1].replace(/\\/g, ''),
+        headers: { 'Referer': 'https://vidsrc.me/' }
+      });
     }
-  }
 
-  // ২. যদি m3u8 ব্লক থাকে, তবে প্রথম সচল প্রোভাইডারের Clean Embed দিয়ে দেবে
-  return res.json({
-    success: true,
-    mode: 'embed',
-    embedUrl: providers[0],
-    message: 'Playing via working provider embed.'
-  });
+    // ২. m3u8 না পাওয়া গেলে সরাসরি Working Embed Stream পাঠানো
+    return res.json({
+      success: true,
+      mode: 'embed',
+      embedUrl: embedFallback
+    });
+
+  } catch (error) {
+    // যেকোনো ব্যাকএন্ড এররে ফলব্যাক এম্বেড
+    return res.json({
+      success: true,
+      mode: 'embed',
+      embedUrl: embedFallback
+    });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
